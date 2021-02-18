@@ -1,3 +1,4 @@
+# https://pythonprogramming.net/client-chatroom-sockets-tutorial-python-3/
 import socket
 import select
 import errno
