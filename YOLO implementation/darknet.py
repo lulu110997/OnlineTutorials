@@ -8,6 +8,70 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
 
+class Darknet(nn.Module):
+	'''
+	Output of a YOLO algo is n x n x a x (5+C)
+	n: number of grip
+	a: number of anchors
+	C: is the number of class
+	5 + C because each cell outputs Pc, bx, by, bh, bw + # classes
+	'''
+	def __init__(self):
+		super(Darknet, self).__init__()
+		self.blocks = parse_cfg('cfg/yolov3.cfg')
+		self.net_info, self.module_list = create_modules(self.blocks)
+
+	def forward(self,x,CUDA):
+		modules = self.blocks[1:]
+		output_feature_maps = {} # Stores the feature maps of the previous layers in a dict
+		write = 0
+		for index, item in enumerate(modules):
+			module_type = item['type']
+			if module_type == 'convolutional' or module_type == 'upsample':
+				x = self.module_list[index](x) # Feed the input in the network's layer
+
+			elif module_type == 'route':
+				layers = item['layers']
+				layers = [int(a) for a in layers]
+
+				# if layers[0] > 0:
+				# 	layers[0] = layers[0] - index
+
+				if len(layers) == 1: 
+					# if only 1 number is in the list, obtain the feature map from the previous layers[0]
+					x = output_feature_maps[index + layers[0]]
+				else: 
+					# Need to concatenate the feature maps from two previous layers 
+					layers[1] = layers[1] - index
+
+					map1 = output_feature_maps[i + layers[0]]
+					map2 = output_feature_maps[i + layers[1]]
+					# Concatenate the maps along the depth. Remember that the dim in pytorch is 
+					# batch x depth x height x width
+					x = torch.cat((map1,map2),1) 
+
+			elif module_type == 'shortcut':
+				# Skip connection		
+				from_ = int(module['from'])
+				x = outputs[index-1] + outputs[index+from_] 
+
+class EmptyLayer(nn.Module):
+	'''
+	Dummy layer for the route and shortcut layers. Rather than defining the forward pass here, the 
+	actual operation of the route and shortcut layer can be done in the forward pass of the darknet
+	'''
+	def __init__(self):
+		super(EmptyLayer,self).__init__()
+
+class DetectionLayer(nn.Module):
+	'''
+	Holds the anchors used to detect bounding boxes
+	'''
+	def __init__(self, anchors):
+		super(DetectionLayer, self).__init__()
+		self.anchors = anchors
+
+
 def parse_cfg(cfgfile):
 	'''
 	Takes a configuration file
@@ -17,6 +81,8 @@ def parse_cfg(cfgfile):
 
 	Note how the first item of the dictionary, blocks, is going to be
 	the network information
+
+	The blocks is a list of dictionaries which has strings inside of them
 	'''
 	file = open(cfgfile, 'r')
 	lines = file.read().split('\n') # This reads the whole file and stores each line in the file into a list
@@ -57,7 +123,7 @@ def create_modules(blocks):
 
 	Returns an nn.ModuleList, which is similar to a Python list that contains
 	nn.Module objects but whatever is inside this list will become part of 
-	the nn.Module module
+	the nn.Module module. Contains the operations for each layer of the network
 	'''
 	net_info = blocks[0] # Captures the info about the network (input and pre-processing)
 	module_list = nn.ModuleList() # Store the block's parameters as a member of the nn.Module module
@@ -65,7 +131,9 @@ def create_modules(blocks):
 					 # as 3 because the initial input image is RGB and has depth 3
 	output_filters = [] # Keeps track of the filter depth for each block in case the route laye brings in a 
 						# concatenated feature map from previous layers
-	for index, block in enumerate(blocks[1:]): # Iterate through the each layer of the network, not including the networks info
+	for index, block in enumerate(blocks[1:]):
+		# continue
+	# Iterate through the each block of the network, not including the networks info
 		module = nn.Sequential()
 		# Check the type of block
 		# Create a new module for the block
@@ -104,14 +172,65 @@ def create_modules(blocks):
 
 			# Add activation layer
 			if activation == "leaky":
-				activation_fn = nn.LeakyRelu(0.1, inplace=True)
-				module.add_moduel("leaky_{}".format(index), activation_fn)
+				activation_fn = nn.LeakyReLU(0.1, inplace=True)
+				module.add_module("leaky_{}".format(index), activation_fn)
 
-		elif block['type'] == 'upsample' # for upsampling, use Bilinear2dUpsampling:
+		elif block['type'] == 'upsample': # for upsampling, use Bilinear2dUpsampling:
+			stride = int(block["stride"])
+			upsample = nn.Upsample(scale_factor = stride, mode="biliner")
+			module.add_module("upsample{}".format(index), upsample)
 
-		print(module)
+		elif block['type'] == 'route': # Route layer
+			route = EmptyLayer()
+			module.add_module("route{}".format(index), route)
+
+			# Need to split the string into a list with two elements,
+			# then obtain the start and end values, converting the
+			# strings into an integer type
+			block['layers'] = block['layers'].split(',')
+			start = int(block['layers'][0])
+			try:
+				end = int(block['layers'][1])
+			except:
+				end = 0
+
+			# Positive annotation
+			# if start > 0:
+			# 	start = start - index
+			# if end > 0:
+			# 	end = end - index
+
+			# Change the filter output for this layer as required
+			if end != 0: # Concatenate feature maps from previous layer and index+start layer
+				filters = output_filters[index + start] + output_filters[end]
+			else: # Output the feature map from this layer
+				filters = output_filters[index + start]
+
+		elif block['type'] == 'shortcut': # Skip connection like the ones in RESNET models
+			shortcut = EmptyLayer()
+			module.add_module("shortcut{}".format(index), shortcut)
+
+		elif block['type'] == 'yolo':
+			# For choosing which bounding box to use at a specific scale
+			mask = block['mask'].split(',')
+			mask = [int(x) for x in mask ]
+
+			# Each cell is responsible for predicting 3 bounding boxes
+			anchors = block['anchors'].split(',')
+			anchors = [int(x) for x in anchors]
+			anchors = [(anchors[x], anchors[x+1]) for x in range(0, len(anchors),2)]
+			anchors = [x for index, x in enumerate(anchors) if index in mask] # anchors = [anchors[i] for i in mask]
+
+			detection = DetectionLayer(anchors)
+			module.add_module("Detection_{}".format(index), detection)
+
+		module_list.append(module)
+		output_filters.append(filters)
+		prev_filters = filters
+
+	return net_info, module_list
+
+
 blocks = parse_cfg('cfg/yolov3.cfg')
-create_modules(blocks)
-print(blocks[1:5])
-print("\n")
-print(blocks[0:5])
+a = create_modules(blocks)
+b = Darknet()
