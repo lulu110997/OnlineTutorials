@@ -24,7 +24,7 @@ while True:
 	if message: # In case someone just presses enter
 		message = message.encode('utf-8')
 		message_header = f"{len(message):<{HEADER_LENGTH}}".encode('utf-8')
-		client_socket.send(message_header + message)
+		client_socket.send(message_header + message) # Send to self
 
 	
 	# Receive things until we hit an error
@@ -47,10 +47,14 @@ while True:
 			print(f"{username} > {message}")
 
 	except IOError as e:
+		# This is normal on non blocking connections - when there are no incoming data error is going to be raised
+        # Some operating systems will indicate that using AGAIN, and some using WOULDBLOCK error code
+        # We are going to check for both - if one of them - that's expected, means no incoming data, continue as normal
+        # If we got different error code - something happened
 			if e.errno != errno.EAGAIN and e.errno != errno.EWOULDBLOCK:
 				print('Reading error', str(e))
 				sys.exit()
-			continue
+			continue # Cause nothing happened
 
 	except Exception as e:
 			print('General error',str(e))

@@ -28,6 +28,7 @@ def receive_message(client_socket):
 		return False
 
 while True:
+	# Wait until there's a new connection or we have a new message
 	read_sockets, __, exception_sockets = select.select(sockets_list, [], sockets_list)
 
 	for notified_socket in read_sockets:
@@ -36,6 +37,7 @@ while True:
 
 			user = receive_message(client_socket)
 			if user is False: # Someone just disconnected
+				print("disconnected")
 				continue
 
 			sockets_list.append(client_socket) # Add new client socket to list
@@ -47,7 +49,6 @@ while True:
 
 			if message is False: # Someone disconnected
 				# print(f"Closed connection from {clients[notified_socket]['data'].decode('utf-8')}")
-				print(clients)
 				print('Closed connection from: {}'.format(clients[notified_socket]['data'].decode('utf-8')))
 				# Clean up
 				sockets_list.remove(notified_socket)
@@ -61,6 +62,6 @@ while True:
 				if client_socket != notified_socket: # Don't send message to sender
 					client_socket.send(user['header'] + user['data'] + message['header'] + message['data'])
 
-			for notified_socket in exception_sockets:
-				socket_list.remove(notified_socket)
+			for notified_socket in exception_sockets: # Some error
+				sockets_list.remove(notified_socket)
 				del clients[notified_socket]
